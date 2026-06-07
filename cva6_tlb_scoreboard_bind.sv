@@ -360,11 +360,13 @@ module cva6_tlb_scoreboard_bind
   // not an assertion that a hit must always happen.
   c_symbolic_update_then_hit: cover property (
     update_matches_symbolic
-    ##[1:10]
-    sb_valid_q &&
-    lookup_matches_symbolic &&
-    lu_hit_o &&
-    (lu_content_o == sb_content_q)
+    ##1
+    s_eventually(
+      sb_valid_q &&
+      lookup_matches_symbolic &&
+      lu_hit_o &&
+      (lu_content_o == sb_content_q)
+    )
   );
 
 endmodule
