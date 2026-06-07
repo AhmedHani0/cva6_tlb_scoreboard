@@ -1,14 +1,24 @@
 // cva6_tlb_scoreboard_bind.sv
 // -----------------------------------------------------------------------------
-// Direct-bind scoreboard for standalone CVA6 TLB verification.
+// Direct-bind symbolic-entry scoreboard for standalone CVA6 TLB verification.
 //
-// Step 3 scope:
-//   - Full abstract scoreboard array with TLB_ENTRIES entries
-//   - Non-hypervisor only: RVH/G-stage/V-mode disabled by the formal top
-//   - Normal 4 KiB pages only
-//   - No NAPOT/Svnapot
-//   - No global mappings yet
-//   - Scoreboard models the same PLRU replacement policy abstractly
+//   - One symbolic tracked TLB translation.
+//   - No full TLB table modeling.
+//   - Data integrity is checked only when the DUT reports a hit.
+//   - If the DUT misses for the symbolic address, the checker does not require
+//     a hit, because the symbolic translation may never have been inserted,
+//     may have been replaced, or may have been flushed.
+//   - Cover property is used to witness: symbolic update -> later symbolic hit.
+//   - Current scope: non-hypervisor, normal 4 KiB pages, no NAPOT/Svnapot.
+//
+// Abbreviations:
+//   TLB   = Translation Lookaside Buffer.
+//   VPN   = Virtual Page Number.
+//   ASID  = Address Space Identifier.
+//   VMID  = Virtual Machine Identifier.
+//   PTE   = Page Table Entry.
+//   NAPOT = Naturally Aligned Power Of Two.
+//   PLRU  = Pseudo Least Recently Used.
 // -----------------------------------------------------------------------------
 
 module cva6_tlb_scoreboard_bind
@@ -28,7 +38,7 @@ module cva6_tlb_scoreboard_bind
     input logic g_st_enbl_i,
     input logic v_i,
 
-    // Full TLB update packet.
+    // Full TLB update/refill packet.
     input tlb_update_cva6_t update_i,
 
     // Lookup interface.
@@ -37,74 +47,96 @@ module cva6_tlb_scoreboard_bind
     input logic [CVA6Cfg.VMID_WIDTH-1:0] lu_vmid_i,
     input logic [CVA6Cfg.VLEN-1:0] lu_vaddr_i,
     input logic [CVA6Cfg.GPLEN-1:0] lu_gpaddr_o,
+
+    // Lookup result.
     input pte_cva6_t lu_content_o,
     input pte_cva6_t lu_g_content_o,
+    input logic [CVA6Cfg.PtLevels-2:0] lu_is_page_o,
+    input logic lu_hit_o,
 
     // Flush filters.
     input logic [CVA6Cfg.ASID_WIDTH-1:0] asid_to_be_flushed_i,
     input logic [CVA6Cfg.VMID_WIDTH-1:0] vmid_to_be_flushed_i,
     input logic [CVA6Cfg.VLEN-1:0] vaddr_to_be_flushed_i,
-    input logic [CVA6Cfg.GPLEN-1:0] gpaddr_to_be_flushed_i,
-
-    // Lookup result.
-    input logic [CVA6Cfg.PtLevels-2:0] lu_is_page_o,
-    input logic lu_hit_o,
-
-    // Optional internal DUT signals connected by bind for sanity/debug checks.
-    // not needed for scoreboard comparison.
-    input logic [TLB_ENTRIES-1:0] dut_lu_hit,
-    input logic [TLB_ENTRIES-1:0] dut_replace_en
+    input logic [CVA6Cfg.GPLEN-1:0] gpaddr_to_be_flushed_i
 );
 
-  localparam int unsigned VPN_LEN    = CVA6Cfg.VpnLen;
-  localparam int unsigned PLRU_WIDTH = 2 * (TLB_ENTRIES - 1);
+  // ---------------------------------------------------------------------------
+  // Local constants.
+  // ---------------------------------------------------------------------------
+  localparam int unsigned VPN_LEN = CVA6Cfg.VpnLen;
 
   // ---------------------------------------------------------------------------
-  // Abstract scoreboard entry.
+  // Symbolic identity of the one abstract entry we track.
+  //
+  // These are free formal variables. The stability assumptions below make
+  // OneSpin choose one arbitrary VPN/ASID/VMID and keep it fixed throughout
+  // the proof. This is the symbolic address/context we care about.
   // ---------------------------------------------------------------------------
-  typedef struct packed {
-    logic valid;
-    logic [VPN_LEN-1:0] vpn;
-    logic [CVA6Cfg.ASID_WIDTH-1:0] asid;
-    logic [CVA6Cfg.PtLevels-2:0] is_page;
-    logic is_napot_64k;
-    logic [HYP_EXT:0] v_st_enbl;
-    pte_cva6_t content;
-  } sb_entry_t;
-
-  sb_entry_t sb_q [TLB_ENTRIES];
+  logic [VPN_LEN-1:0] symbolic_vpn;
+  logic [CVA6Cfg.ASID_WIDTH-1:0] symbolic_asid;
+  logic [CVA6Cfg.VMID_WIDTH-1:0] symbolic_vmid;
 
   // ---------------------------------------------------------------------------
-  // Helper state for modelling the MMU/shared-TLB/PTW environment.
-  // pending_miss_q means: a lookup missed and the environment may later refill it.
+  // Abstract scoreboard state for the symbolic entry.
+  //
+  // sb_valid_q:
+  //   The checker has observed an accepted update for the symbolic identity.
+  //
+  // sb_content_q:
+  //   The S-stage PTE that was last updated for the symbolic identity.
+  //
+  // sb_g_content_q:
+  //   The G-stage PTE stored for future hypervisor extension support.
+  //   In the current non-hypervisor scope, it is stored but not asserted.
+  //
+  // sb_is_page_q:
+  //   Page-size information returned by the TLB on lookup.
+  //
+  // sb_is_napot_64k_q:
+  //   Stored for future NAPOT extension support.
+  //
+  // sb_v_st_enbl_q:
+  //   Stored translation-stage-enable information.
   // ---------------------------------------------------------------------------
-  logic pending_miss_q;
-  logic [VPN_LEN-1:0] pending_vpn_q;
-  logic [CVA6Cfg.ASID_WIDTH-1:0] pending_asid_q;
+  logic sb_valid_q;
+  logic [CVA6Cfg.PtLevels-2:0] sb_is_page_q;
+  logic sb_is_napot_64k_q;
+  logic [HYP_EXT:0] sb_v_st_enbl_q;
+  pte_cva6_t sb_content_q;
+  pte_cva6_t sb_g_content_q;
 
   // ---------------------------------------------------------------------------
-  // Scoreboard PLRU = Pseudo Least Recently Used replacement model
-  // This is the scoreboard's own abstract copy
+  // Helper function: extract VPN from a virtual address.
+  //
+  // For normal 4 KiB pages, the lower 12 bits are the page offset and are not
+  // part of the VPN.
   // ---------------------------------------------------------------------------
-  logic [PLRU_WIDTH-1:0] sb_plru_tree_q;
-  logic [PLRU_WIDTH-1:0] sb_plru_tree_n;
-  logic [TLB_ENTRIES-1:0] sb_replace_en;
-
-  // Scoreboard lookup prediction.
-  logic [TLB_ENTRIES-1:0] sb_hit;
-  pte_cva6_t sb_expected_content;
-  logic [CVA6Cfg.PtLevels-2:0] sb_expected_is_page;
+  function automatic logic [VPN_LEN-1:0] vpn_from_vaddr(
+      input logic [CVA6Cfg.VLEN-1:0] vaddr
+  );
+    vpn_from_vaddr = vaddr[VPN_LEN+11:12];
+  endfunction
 
   // ---------------------------------------------------------------------------
   // Basic helper wires.
   // ---------------------------------------------------------------------------
   wire asid_flush_is_zero  = ~(|asid_to_be_flushed_i);
   wire vaddr_flush_is_zero = ~(|vaddr_to_be_flushed_i);
-  wire flush_all = flush_i && asid_flush_is_zero && vaddr_flush_is_zero;
 
-  // effective_tlb_update = update request that the RTL can actually accept.
-  // If flush and update are high together, flush wins in the RTL and the update is ignored.
+  wire flush_all =
+      flush_i &&
+      asid_flush_is_zero &&
+      vaddr_flush_is_zero;
+
+  // effective_tlb_update:
+  //   An update request that the TLB can actually accept.
+  //
+  // RTL priority:
+  //   If flush and update are high in the same cycle, flush wins and the update
+  //   is ignored by the TLB.
   wire effective_tlb_update;
+
   assign effective_tlb_update =
       update_i.valid
       && !flush_i
@@ -112,8 +144,14 @@ module cva6_tlb_scoreboard_bind
       && !flush_gvma_i
       && !lu_hit_o;
 
-  // Step 3 only supported update: normal 4 KiB, no NAPOT, no hypervisor.
+  // supported_update:
+  //   Current restricted proof scope: normal 4 KiB, non-NAPOT, non-hypervisor.
+  //
+  // This assumption keeps the current symbolic checker focused. Page-size,
+  // NAPOT, and hypervisor extensions can be added later by extending the
+  // symbolic matching functions.
   wire supported_update;
+
   assign supported_update =
       effective_tlb_update
       && (update_i.is_page == '0)
@@ -122,296 +160,211 @@ module cva6_tlb_scoreboard_bind
       && (HYP_EXT == 0)
       && (!CVA6Cfg.RVH);
 
-  wire lookup_miss;
-  assign lookup_miss = lu_access_i && !lu_hit_o;
+  // update_matches_symbolic:
+  //   The accepted TLB update/refill is for the symbolic identity.
+  //
+  // Only in this case do we update the scoreboard. Updates for all other
+  // addresses/ASIDs/VMIDs are ignored by the abstract checker.
+  wire update_matches_symbolic;
 
-  // Extract VPN = Virtual Page Number from a virtual address.
-  function automatic logic [VPN_LEN-1:0] vpn_from_vaddr(input logic [CVA6Cfg.VLEN-1:0] vaddr);
-    vpn_from_vaddr = vaddr[VPN_LEN+11:12];
-  endfunction
+  assign update_matches_symbolic =
+      effective_tlb_update
+      && (update_i.vpn[VPN_LEN-1:0] == symbolic_vpn)
+      && (update_i.asid == symbolic_asid)
+      && (update_i.vmid == symbolic_vmid);
 
-  function automatic int unsigned count_ones(input logic [TLB_ENTRIES-1:0] vector);
-    int unsigned count;
-    count = 0;
-    foreach (vector[i]) begin
-      count += vector[i];
-    end
-    return count;
-  endfunction
+  // lookup_matches_symbolic:
+  //   The current lookup request is for the symbolic identity.
+  //
+  // In this 4 KiB scope, full VPN equality is used.
+  // ASID match follows the normal rule:
+  //   - non-global PTE: ASID must match
+  //   - global PTE: ASID may differ
+  wire lookup_matches_symbolic;
 
-  // Step 3A lookup matching: normal 4 KiB pages only.
-  function automatic logic entry_matches_lookup(input sb_entry_t entry);
-    logic vpn_matches;
-    logic asid_matches;
-    logic stage_matches;
+  assign lookup_matches_symbolic =
+      lu_access_i
+      && (vpn_from_vaddr(lu_vaddr_i) == symbolic_vpn)
+      && ((lu_asid_i == symbolic_asid) || sb_content_q.g);
 
-    vpn_matches   = (entry.vpn == vpn_from_vaddr(lu_vaddr_i));
-    asid_matches  = (lu_asid_i == entry.asid) || entry.content.g;
-    stage_matches = (entry.v_st_enbl == '1);
+  // Flush matching for the symbolic entry.
+  wire symbolic_flush_vpn_matches;
 
-    entry_matches_lookup =
-        entry.valid
-        && lu_access_i
-        && s_st_enbl_i
-        && !g_st_enbl_i
-        && !v_i
-        && (entry.is_page == '0)
-        && !entry.is_napot_64k
-        && vpn_matches
-        && asid_matches
-        && stage_matches;
-  endfunction
+  assign symbolic_flush_vpn_matches =
+      (vpn_from_vaddr(vaddr_to_be_flushed_i) == symbolic_vpn);
 
-  // Step 3A flush matching for normal 4 KiB entries.
-  function automatic logic flush_matches_entry(input sb_entry_t entry);
-    logic flush_vpn_matches;
-    flush_vpn_matches = (vpn_from_vaddr(vaddr_to_be_flushed_i) == entry.vpn);
+  // flush_matches_symbolic:
+  //   A normal SFENCE.VMA flush invalidates the symbolic scoreboard entry.
+  //
+  // Normal flush cases:
+  //   SFENCE.VMA x0, x0:
+  //     flush all entries.
+  //
+  //  SFENCE.VMA vaddr, x0:
+  //     flush matching virtual address for all ASIDs, including global entries.
+  //
+  //  SFENCE.VMA x0, asid:
+  //     flush non-global entries matching this ASID.
+  //
+  //  SFENCE.VMA vaddr, asid:
+  //     flush non-global entries matching this VPN and ASID.
+  wire flush_matches_symbolic;
 
-    if (!entry.valid) begin
-      flush_matches_entry = 1'b0;
-    end
-    // SFENCE.VMA x0, x0: flush all entries.
-    else if (asid_flush_is_zero && vaddr_flush_is_zero) begin
-      flush_matches_entry = 1'b1;
-    end
-    // SFENCE.VMA vaddr, x0: flush this VPN for all ASIDs, including global.
-    else if (asid_flush_is_zero && !vaddr_flush_is_zero && flush_vpn_matches) begin
-      flush_matches_entry = 1'b1;
-    end
-    // SFENCE.VMA x0, asid: flush non-global entries of this ASID.
-    else if (!asid_flush_is_zero && vaddr_flush_is_zero &&
-             !entry.content.g &&
-             (asid_to_be_flushed_i == entry.asid)) begin
-      flush_matches_entry = 1'b1;
-    end
-    // SFENCE.VMA vaddr, asid: flush non-global entry matching VPN and ASID.
-    else if (!asid_flush_is_zero && !vaddr_flush_is_zero &&
-             !entry.content.g &&
-             flush_vpn_matches &&
-             (asid_to_be_flushed_i == entry.asid)) begin
-      flush_matches_entry = 1'b1;
-    end
-    else begin
-      flush_matches_entry = 1'b0;
-    end
-  endfunction
-
-  // ---------------------------------------------------------------------------
-  // Scoreboard lookup
-  // If multiple entries hit, the expected_content loop mimics RTL loop order,
-  // Step 3 also asserts that the scoreboard produces at most one hit.
-  // ---------------------------------------------------------------------------
-  always_comb begin
-    sb_hit              = '0;
-    sb_expected_content = '0;
-    sb_expected_is_page = '0;
-
-    for (int i = 0; i < TLB_ENTRIES; i++) begin
-      sb_hit[i] = entry_matches_lookup(sb_q[i]);
-      if (sb_hit[i]) begin
-        sb_expected_content = sb_q[i].content;
-        sb_expected_is_page = sb_q[i].is_page;
-      end
-    end
-  end
+  assign flush_matches_symbolic =
+      sb_valid_q
+      && flush_i
+      && (
+          // SFENCE.VMA x0, x0
+          (asid_flush_is_zero && vaddr_flush_is_zero)
+          ||
+          // SFENCE.VMA vaddr, x0
+          (asid_flush_is_zero && !vaddr_flush_is_zero &&
+           symbolic_flush_vpn_matches)
+          ||
+          // SFENCE.VMA x0, asid; non-global only
+          (!asid_flush_is_zero && vaddr_flush_is_zero &&
+           !sb_content_q.g &&
+           (asid_to_be_flushed_i == symbolic_asid))
+          ||
+          // SFENCE.VMA vaddr, asid; non-global only
+          (!asid_flush_is_zero && !vaddr_flush_is_zero &&
+           !sb_content_q.g &&
+           symbolic_flush_vpn_matches &&
+           (asid_to_be_flushed_i == symbolic_asid))
+      );
 
   // ---------------------------------------------------------------------------
-  // Scoreboard PLRU model.
-  // This mirrors the RTL PLRU algorithm but uses sb_hit instead of dut_lu_hit.
-  // ---------------------------------------------------------------------------
-  always_comb begin
-    sb_plru_tree_n = sb_plru_tree_q;
-    sb_replace_en  = '0;
-
-    // Update PLRU tree on lookup hit.
-    for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
-      automatic int unsigned idx_base, shift, new_index;
-
-      if (sb_hit[i] && lu_access_i) begin
-        for (int unsigned lvl = 0; lvl < $clog2(TLB_ENTRIES); lvl++) begin
-          idx_base  = $unsigned((2 ** lvl) - 1);
-          shift     = $clog2(TLB_ENTRIES) - lvl;
-          new_index = ~((i >> (shift - 1)) & 32'b1);
-          sb_plru_tree_n[idx_base + (i >> shift)] = new_index[0];
-        end
-      end
-    end
-
-    // Decode current PLRU tree into replacement enable vector.
-    for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
-      automatic logic en;
-      automatic int unsigned idx_base, shift, new_index;
-
-      en = 1'b1;
-      for (int unsigned lvl = 0; lvl < $clog2(TLB_ENTRIES); lvl++) begin
-        idx_base  = $unsigned((2 ** lvl) - 1);
-        shift     = $clog2(TLB_ENTRIES) - lvl;
-        new_index = (i >> (shift - 1)) & 32'b1;
-
-        if (new_index[0]) begin
-          en &= sb_plru_tree_q[idx_base + (i >> shift)];
-        end else begin
-          en &= ~sb_plru_tree_q[idx_base + (i >> shift)];
-        end
-      end
-      sb_replace_en[i] = en;
-    end
-  end
-
-  // ---------------------------------------------------------------------------
-  // Full-array scoreboard state update.
-  // Priority matches RTL: reset -> flush -> accepted update.
-  // PLRU tree updates every cycle from sb_plru_tree_n, matching the RTL style.
+  // Symbolic scoreboard state update.
+  //
+  // Priority:
+  //   reset -> matching flush -> accepted matching update
+  //
+  // If a flush and update happen together
+  // flush wins in the RTL. Therefore the scoreboard also ignores that update.
   // ---------------------------------------------------------------------------
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      for (int i = 0; i < TLB_ENTRIES; i++) begin
-        sb_q[i] <= '0;
-      end
-      sb_plru_tree_q <= '0;
+      sb_valid_q        <= 1'b0;
+      sb_is_page_q      <= '0;
+      sb_is_napot_64k_q <= 1'b0;
+      sb_v_st_enbl_q    <= '0;
+      sb_content_q      <= '0;
+      sb_g_content_q    <= '0;
     end else begin
-      sb_plru_tree_q <= sb_plru_tree_n;
-
-      if (flush_i) begin
-        for (int i = 0; i < TLB_ENTRIES; i++) begin
-          if (flush_matches_entry(sb_q[i])) begin
-            sb_q[i].valid <= 1'b0;
-          end
-        end
-      end else if (effective_tlb_update) begin
-        for (int i = 0; i < TLB_ENTRIES; i++) begin
-          if (sb_replace_en[i]) begin
-            sb_q[i].valid        <= 1'b1;
-            sb_q[i].vpn          <= update_i.vpn[VPN_LEN-1:0];
-            sb_q[i].asid         <= update_i.asid;
-            sb_q[i].is_page      <= update_i.is_page;
-            sb_q[i].is_napot_64k <= update_i.is_napot_64k;
-            sb_q[i].v_st_enbl    <= update_i.v_st_enbl;
-            sb_q[i].content      <= update_i.content;
-          end
-        end
+      if (flush_matches_symbolic) begin
+        sb_valid_q <= 1'b0;
+      end else if (update_matches_symbolic) begin
+        sb_valid_q        <= 1'b1;
+        sb_is_page_q      <= update_i.is_page;
+        sb_is_napot_64k_q <= update_i.is_napot_64k;
+        sb_v_st_enbl_q    <= update_i.v_st_enbl;
+        sb_content_q      <= update_i.content;
+        sb_g_content_q    <= update_i.g_content;
       end
     end
   end
 
   // ---------------------------------------------------------------------------
-  // Pending-miss environment model.
-  // A miss creates a pending request. An accepted update resolves it.
+  // Default clock/reset for SVA.
   // ---------------------------------------------------------------------------
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      pending_miss_q <= 1'b0;
-      pending_vpn_q  <= '0;
-      pending_asid_q <= '0;
-    end else begin
-      if (flush_i) begin
-        pending_miss_q <= 1'b0;
-        pending_vpn_q  <= '0;
-        pending_asid_q <= '0;
-      end else if (effective_tlb_update) begin
-        pending_miss_q <= 1'b0;
-      end else if (lookup_miss && !pending_miss_q) begin
-        pending_miss_q <= 1'b1;
-        pending_vpn_q  <= vpn_from_vaddr(lu_vaddr_i);
-        pending_asid_q <= lu_asid_i;
-      end
-    end
-  end
-
   default clocking cb @(posedge clk_i); endclocking
   default disable iff (!rst_ni);
 
   // ---------------------------------------------------------------------------
-  // Assumptions
+  // Assumptions.
   // ---------------------------------------------------------------------------
 
-  // An accepted update must correspond to a previous unresolved miss.
-  a_update_only_after_pending_miss: assume property (
-    effective_tlb_update |-> pending_miss_q
+  // The symbolic identity is arbitrary but stable.
+  // OneSpin may choose any VPN/ASID/VMID, but once chosen it must not change.
+  a_symbolic_vpn_stable: assume property (
+    $stable(symbolic_vpn)
   );
 
-  // The accepted update must refill the same VPN and ASID that missed.
-  a_update_matches_pending_miss: assume property (
-    effective_tlb_update |->
-      (update_i.vpn[VPN_LEN-1:0] == pending_vpn_q) &&
-      (update_i.asid == pending_asid_q)
+  a_symbolic_asid_stable: assume property (
+    $stable(symbolic_asid)
   );
 
-  // Step 3A: only normal 4 KiB, non-NAPOT, non-hypervisor updates.
+  a_symbolic_vmid_stable: assume property (
+    $stable(symbolic_vmid)
+  );
+
+  // Current proof scope:
+  // every accepted update is a normal 4 KiB, non-NAPOT, non-hypervisor update.
   a_only_supported_updates: assume property (
     effective_tlb_update |-> supported_update
   );
 
-  // Step 3A: global mappings are postponed to Step 3B.
-  a_step3a_no_global_updates: assume property (
+  // Current scope:
+  // global mappings are postponed to a later step.
+  a_no_global_updates_yet: assume property (
     effective_tlb_update |-> !update_i.content.g
   );
 
-  // During flush, the environment does not also send a refill request.
+  // Environment contract:
+  // during a flush, the surrounding MMU/PTW/shared-TLB environment does not
+  // also present a refill.
   a_no_update_during_flush: assume property (
     flush_i |-> !update_i.valid
   );
 
   // ---------------------------------------------------------------------------
-  // Assertions
+  // Assertions.
   // ---------------------------------------------------------------------------
 
-  // Scoreboard itself should not predict two matching entries in Step 3A.
-  p_scoreboard_at_most_one_hit: assert property (
-    count_ones(sb_hit) <= 1
+  // Data-integrity property:
+  //
+  // If the scoreboard has observed an accepted update for the symbolic identity,
+  // and the current lookup is for that symbolic identity, and the DUT says hit,
+  // then the returned PTE and page-size information must match the scoreboard.
+  //
+  // Important:
+  // This property does NOT require a hit. If the DUT misses, we do not fail,
+  // because the symbolic translation may have been replaced or may not be present
+  // in the TLB. This avoids modeling PLRU replacement.
+  p_symbolic_data_integrity_on_hit: assert property (
+    sb_valid_q &&
+    lookup_matches_symbolic &&
+    lu_hit_o
+    |->
+    (lu_content_o == sb_content_q) &&
+    (lu_is_page_o == sb_is_page_q)
   );
 
-  // Scoreboard PLRU replacement vector should select exactly one entry.
-  p_scoreboard_one_replace_entry: assert property (
-    count_ones(sb_replace_en) == 1
-  );
-
-  // Optional internal sanity checks for debug only, not pure scoreboard abstraction.
-  p_at_most_one_replace_entry: assert property (
-    count_ones(dut_replace_en) <= 1
-  );
-
-  p_visible_hit_matches_internal_hit_vector: assert property (
-    lu_hit_o == (|dut_lu_hit)
-  );
-
-  // External scoreboard hit/miss equivalence.
-  p_lookup_hit_matches_scoreboard: assert property (
-    lu_access_i |-> (lu_hit_o == (|sb_hit))
-  );
-
-  // External scoreboard content/page-size equivalence when the model predicts a hit.
-  p_lookup_content_matches_scoreboard: assert property (
-    lu_access_i && (|sb_hit) |->
-      (lu_content_o == sb_expected_content) &&
-      (lu_is_page_o == sb_expected_is_page)
-  );
-
-  // Full flush: after SFENCE.VMA x0, x0, a lookup in the next cycle must miss
-  // unless a new update is accepted in that next cycle.
+  // Full-flush sanity property:
+  //
+  // After SFENCE.VMA x0, x0, the next-cycle lookup should not hit unless a new
+  // effective update is accepted in that next cycle.
+  //
+  // This is a visible black-box sanity property, not a PLRU/full-table check.
   p_full_flush_clears_visible_hit: assert property (
-    flush_all ##1 (lu_access_i && !effective_tlb_update) |-> !lu_hit_o
-  );
-
-  // If VPN X / ASID A missed before and no refill happened yet,
-  // looking up VPN X / ASID A again should still miss.
-  p_pending_miss_same_lookup_stays_miss_until_refill: assert property (
-    pending_miss_q &&
-    lu_access_i &&
-    (vpn_from_vaddr(lu_vaddr_i) == pending_vpn_q) &&
-    (lu_asid_i == pending_asid_q) &&
-    !effective_tlb_update
+    flush_all
+    ##1
+    (lu_access_i && !effective_tlb_update)
     |->
     !lu_hit_o
   );
 
-  // Cover: miss -> accepted update/refill -> later hit from scoreboard.
-  c_miss_update_hit_flow: cover property (
-    (lu_access_i && !lu_hit_o)
-    ##[1:5]
-    supported_update
-    ##[1:5]
-    (lu_access_i && (|sb_hit) && lu_hit_o && (lu_content_o == sb_expected_content))
+  // ---------------------------------------------------------------------------
+  // Cover / witness.
+  // ---------------------------------------------------------------------------
+
+  // Witness property:
+  //
+  // Ask OneSpin to find one trace where:
+  //   1. the TLB accepts an update for the symbolic identity,
+  //   2. later there is a lookup for the symbolic identity,
+  //   3. the DUT hits,
+  //   4. the returned content matches the scoreboard.
+  //
+  // This demonstrates that the tracked-entry hit scenario is reachable. It is
+  // not an assertion that a hit must always happen.
+  c_symbolic_update_then_hit: cover property (
+    update_matches_symbolic
+    ##[1:10]
+    sb_valid_q &&
+    lookup_matches_symbolic &&
+    lu_hit_o &&
+    (lu_content_o == sb_content_q)
   );
 
 endmodule
@@ -448,8 +401,5 @@ bind cva6_tlb cva6_tlb_scoreboard_bind i_cva6_tlb_scoreboard_bind (
     .gpaddr_to_be_flushed_i(gpaddr_to_be_flushed_i),
 
     .lu_is_page_o          (lu_is_page_o),
-    .lu_hit_o              (lu_hit_o),
-
-    .dut_lu_hit            (lu_hit),
-    .dut_replace_en        (replace_en)
+    .lu_hit_o              (lu_hit_o)
 );
