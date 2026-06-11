@@ -22,8 +22,8 @@ package cva6_tlb_formal_pkg;
   localparam config_pkg::cva6_cfg_t CVA6Cfg =
       build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
 
-  // First proof step: non-hypervisor TLB.
-  localparam int unsigned HYP_EXT = 0;
+  // hypervisor enabled TLB.
+  localparam int unsigned HYP_EXT = 1;
 
   // Keep small for formal at first.
   // Later you can change this to CVA6Cfg.DataTlbEntries or CVA6Cfg.InstrTlbEntries.
