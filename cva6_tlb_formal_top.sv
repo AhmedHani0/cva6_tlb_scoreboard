@@ -17,6 +17,12 @@ module cva6_tlb_formal_top
 
     // Normal TLB controls.
     input logic flush_i,
+    input logic flush_vvma_i,
+    input logic flush_gvma_i,
+
+    input logic s_st_enbl_i,
+    input logic g_st_enbl_i,
+    input logic v_i,
 
     // TLB update packet from the abstract/formal environment.
     input tlb_update_cva6_t update_i,
@@ -25,6 +31,7 @@ module cva6_tlb_formal_top
     input  logic lu_access_i,
     input  logic [CVA6Cfg.ASID_WIDTH-1:0] lu_asid_i,
     input  logic [CVA6Cfg.VLEN-1:0]       lu_vaddr_i,
+    input logic [CVA6Cfg.VMID_WIDTH-1:0] lu_vmid_i,
     output logic [CVA6Cfg.GPLEN-1:0]      lu_gpaddr_o,
     output pte_cva6_t                     lu_content_o,
     output pte_cva6_t                     lu_g_content_o,
@@ -32,40 +39,13 @@ module cva6_tlb_formal_top
     // Normal SFENCE.VMA flush filters.
     input logic [CVA6Cfg.ASID_WIDTH-1:0] asid_to_be_flushed_i,
     input logic [CVA6Cfg.VLEN-1:0]       vaddr_to_be_flushed_i,
+    input logic [CVA6Cfg.VMID_WIDTH-1:0] vmid_to_be_flushed_i,
+    input logic [CVA6Cfg.GPLEN-1:0]      gpaddr_to_be_flushed_i,
 
     // Lookup result.
     output logic [CVA6Cfg.PtLevels-2:0] lu_is_page_o,
     output logic                        lu_hit_o
 );
-
-  // ---------------------------------------------------------------------------
-  // Turn off hypervisor-related signals for the first non-RVH verification step.
-  // ---------------------------------------------------------------------------
-
-  logic flush_vvma_i;
-  logic flush_gvma_i;
-  logic s_st_enbl_i;
-  logic g_st_enbl_i;
-  logic v_i;
-
-  logic [CVA6Cfg.VMID_WIDTH-1:0] lu_vmid_i;
-  logic [CVA6Cfg.VMID_WIDTH-1:0] vmid_to_be_flushed_i;
-  logic [CVA6Cfg.GPLEN-1:0]      gpaddr_to_be_flushed_i;
-
-  assign flush_vvma_i           = 1'b0;
-  assign flush_gvma_i           = 1'b0;
-
-  // Enable normal supervisor translation.
-  assign s_st_enbl_i            = 1'b1;
-
-  // Disable guest/hypervisor translation.
-  assign g_st_enbl_i            = 1'b0;
-  assign v_i                    = 1'b0;
-
-  // Unused hypervisor identifiers/addresses.
-  assign lu_vmid_i              = '0;
-  assign vmid_to_be_flushed_i   = '0;
-  assign gpaddr_to_be_flushed_i = '0;
 
   // ---------------------------------------------------------------------------
   // TLB under verification.
