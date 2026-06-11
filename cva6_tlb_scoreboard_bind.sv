@@ -75,7 +75,7 @@ module cva6_tlb_scoreboard_bind
   // ---------------------------------------------------------------------------
   logic [VPN_LEN-1:0] symbolic_vpn;
   logic [CVA6Cfg.ASID_WIDTH-1:0] symbolic_asid;
-  logic [CVA6Cfg.VMID_WIDTH-1:0] symbolic_vmid;
+  //logic [CVA6Cfg.VMID_WIDTH-1:0] symbolic_vmid;
 
   // ---------------------------------------------------------------------------
   // Abstract scoreboard state for the symbolic entry.
@@ -284,9 +284,9 @@ module cva6_tlb_scoreboard_bind
     $stable(symbolic_asid)
   );
 
-  a_symbolic_vmid_stable: assume property (
-    $stable(symbolic_vmid)
-  );
+  //a_symbolic_vmid_stable: assume property (
+  //  $stable(symbolic_vmid)
+  //);
 
   // Current proof scope:
   // every accepted update is a normal 4 KiB, non-NAPOT, non-hypervisor update.
@@ -347,6 +347,31 @@ module cva6_tlb_scoreboard_bind
   // ---------------------------------------------------------------------------
   // Cover / witness.
   // ---------------------------------------------------------------------------
+// Did the environment ever generate an accepted update for the symbolic entry?
+c_effective_update_seen: cover property (
+  ##[1:10] effective_tlb_update
+);
+
+c_symbolic_update_seen: cover property (
+  ##[1:10] update_matches_symbolic
+);
+
+c_scoreboard_valid_seen: cover property (
+  ##[1:10] sb_valid_q
+);
+
+// Did we ever look up the symbolic entry after it was tracked?
+c_symbolic_lookup_seen: cover property (
+  sb_valid_q &&
+  lookup_matches_symbolic
+);
+
+// Did the DUT ever hit for the symbolic entry?
+c_symbolic_lookup_hit_seen: cover property (
+  sb_valid_q &&
+  lookup_matches_symbolic &&
+  lu_hit_o
+);
 
   // Witness property:
   //
@@ -358,14 +383,16 @@ module cva6_tlb_scoreboard_bind
   //
   // This demonstrates that the tracked-entry hit scenario is reachable. It is
   // not an assertion that a hit must always happen.
-  c_symbolic_update_then_hit: cover property (
-    update_matches_symbolic
-    ##[1:5]
-    sb_valid_q &&
-    lookup_matches_symbolic &&
-    lu_hit_o &&
-    (lu_content_o == sb_content_q)
-  );
+c_symbolic_update_then_hit: cover property (
+  update_matches_symbolic
+  ##[1:10]
+  sb_valid_q &&
+  lookup_matches_symbolic &&
+  lu_hit_o &&
+  (lu_content_o == sb_content_q) &&
+  (lu_is_page_o == sb_is_page_q)
+);
+
 
 endmodule
 
