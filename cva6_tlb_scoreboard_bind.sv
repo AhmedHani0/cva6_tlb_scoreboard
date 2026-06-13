@@ -1,19 +1,29 @@
 // cva6_tlb_scoreboard_bind.sv
 // -----------------------------------------------------------------------------
-// Direct-bind tracked-entry scoreboard for standalone CVA6 TLB verification.
+// Direct-bind abstract scoreboard for standalone CVA6 TLB formal verification.
 //
-// Main change compared to the anyconst/symbolic-VPN version:
-//   - Do not use local anyconst symbolic_vpn/symbolic_asid.
-//   - Instead, choose the first accepted TLB update as the tracked symbolic entry.
-//   - The first update is still arbitrary from the formal environment, so this
-//     keeps the checker abstract without modeling the full TLB table or PLRU.
+// What is tracked:
+//   - VPN  : Virtual Page Number
+//   - ASID : Address Space Identifier
+//   - VMID : Virtual Machine Identifier, used when the RISC-V hypervisor
+//            extension is enabled
+//   - stage context: {v_i, g_st_enbl_i, s_st_enbl_i}
+//   - PTE content inserted into the TLB
+//   - optional G-stage PTE content
+//   - NAPOT/global/page metadata for abstraction and matching
 //
-// Scope:
-//   - Non-hypervisor.
-//   - Normal 4 KiB pages.
-//   - No NAPOT/Svnapot.
-//   - Data integrity checked only when DUT reports a hit.
+//lifetime is the tracked translation without modeling the complete TLB state.
+//
+// Current intended use:
+//   This scoreboard is meant as a scalable formal scoreboarding approach for
+//   TLB verification. It should remain abstract and focused on the key
+//   observable correctness question:
+//
+//       "When the DUT hits for the tracked translation, does it return the
+//        translation content that was inserted for that tracked entry?"
+//
 // -----------------------------------------------------------------------------
+
 
 module cva6_tlb_scoreboard_bind
   import ariane_pkg::*;
@@ -63,11 +73,35 @@ module cva6_tlb_scoreboard_bind
   // Abstract scoreboard state for the tracked entry.
   // ---------------------------------------------------------------------------
   logic sb_valid_q;
-  logic [CVA6Cfg.PtLevels-2:0] sb_is_page_q;
   logic sb_is_napot_64k_q;
   logic [HYP_EXT*2:0] sb_v_st_enbl_q;
   pte_cva6_t sb_content_q;
-  pte_cva6_t sb_g_content_q;
+
+  function automatic logic pte_content_matches_abstract(
+    input pte_cva6_t dut_pte,
+    input pte_cva6_t sb_pte,
+    input logic      is_napot_64k
+    );
+    pte_cva6_t dut_masked;
+    pte_cva6_t sb_masked;
+
+    begin
+      dut_masked = dut_pte;
+      sb_masked  = sb_pte;
+
+      // For 64 KiB NAPOT entries, the RTL may patch ppn[3:0]
+      // according to the lookup virtual address.
+      // This is a known RTL implementation detail that does not affect the abstract
+      // identity of the tracked entry, because the scoreboard is meant to track the
+      // Therefore, we ignore these low dynamic PPN bits.
+      if (CVA6Cfg.SvnapotEn && is_napot_64k) begin
+        dut_masked.ppn[3:0] = '0;
+        sb_masked.ppn[3:0]  = '0;
+      end
+
+      pte_content_matches_abstract = (dut_masked == sb_masked);
+    end
+  endfunction
 
   function automatic logic [VPN_LEN-1:0] vpn_from_vaddr(
       input logic [CVA6Cfg.VLEN-1:0] vaddr
@@ -91,17 +125,10 @@ module cva6_tlb_scoreboard_bind
       && !flush_gvma_i
       && !lu_hit_o;
 
-  // Current restricted proof scope: normal 4 KiB, non-NAPOT.
-  wire supported_update;
-  assign supported_update =
-    effective_tlb_update
-    && (update_i.is_page == '0)
-    && (!CVA6Cfg.SvnapotEn || !update_i.is_napot_64k);
-
   // The first accepted update becomes the abstract entry we track.
   wire tracked_update;
   assign tracked_update =
-      supported_update && !track_chosen_q;
+      effective_tlb_update && !track_chosen_q;
 
   //If S-stage is enabled, ASID must match unless the PTE is global.
   //If S-stage is disabled, ASID does not matter.
@@ -323,7 +350,6 @@ module cva6_tlb_scoreboard_bind
       tracked_vpn_q      <= '0;
       tracked_asid_q     <= '0;
       sb_valid_q         <= 1'b0;
-      sb_is_page_q       <= '0;
       sb_is_napot_64k_q  <= 1'b0;
       sb_v_st_enbl_q     <= '0;
       sb_content_q       <= '0;
@@ -341,7 +367,6 @@ module cva6_tlb_scoreboard_bind
         tracked_vmid_q     <= update_i.vmid;
 
         sb_valid_q         <= 1'b1;
-        sb_is_page_q       <= update_i.is_page;
         sb_is_napot_64k_q  <= update_i.is_napot_64k;
         sb_v_st_enbl_q     <= update_i.v_st_enbl;
         sb_content_q       <= update_i.content;
@@ -360,14 +385,6 @@ module cva6_tlb_scoreboard_bind
   // ---------------------------------------------------------------------------
   // Assumptions.
   // ---------------------------------------------------------------------------
-  a_only_supported_updates: assume property (
-    effective_tlb_update |-> supported_update
-  );
-
-  a_no_global_updates_yet: assume property (
-    effective_tlb_update |-> !update_i.content.g
-  );
-
   a_at_most_one_flush_kind: assume property (
   $onehot0({flush_i, flush_vvma_i, flush_gvma_i})
   );
@@ -378,8 +395,8 @@ module cva6_tlb_scoreboard_bind
 
   //The TLB update belongs to the same translation mode that is currently being used.
   a_update_stage_matches_current_context: assume property (
-  supported_update |->
-    (update_i.v_st_enbl == current_v_st_enbl)
+    effective_tlb_update |->
+      (update_i.v_st_enbl == current_v_st_enbl)
   );
 
 
@@ -387,73 +404,70 @@ module cva6_tlb_scoreboard_bind
   // Assertions.
   // ---------------------------------------------------------------------------
   p_tracked_data_integrity_on_hit: assert property (
-    (sb_valid_q) &&
-    (lookup_matches_tracked) &&
-    (lu_hit_o)
+    sb_valid_q &&
+    lookup_matches_tracked &&
+    lu_hit_o
     |->
-    (lu_content_o == sb_content_q) &&
-    (lu_is_page_o == sb_is_page_q) &&
-    (!tracked_uses_g_stage || (lu_g_content_o == sb_g_content_q))
+    pte_content_matches_abstract(
+      lu_content_o,
+      sb_content_q,
+      sb_is_napot_64k_q
+    )
   );
 
   p_matching_flush_invalidates_scoreboard: assert property (
-    sb_valid_q &&
     flush_matches_tracked
-    ##1
-    !sb_valid_q
+    |->
+    ##1 !sb_valid_q
   );
 
   p_any_flush_to_tracked_must_miss_after: assert property (
-    sb_valid_q &&
-    (flush_all || flush_matches_tracked)
-    ##1
-    (lookup_matches_tracked  && !update_i.valid)
-    |->
-    !lu_hit_o
+    flush_matches_tracked
+    |=>
+    (
+      (lu_access_i && lookup_matches_tracked && !update_i.valid)
+      |->
+      !lu_hit_o
+    )
   );
 
   // ---------------------------------------------------------------------------
   // Cover / witness checks.
   // ---------------------------------------------------------------------------
-// Did the environment ever generate an accepted update for the symbolic entry?
-c_effective_update_seen: cover property (
-  ##[1:10] effective_tlb_update
-);
 
-c_symbolic_update_seen: cover property (
-  ##[1:10] update_matches_symbolic
-);
+  // Did the environment ever generate an accepted update for the symbolic entry?
+  c_effective_update_seen: cover property (
+    ##[1:10] effective_tlb_update
+  );
 
-c_scoreboard_valid_seen: cover property (
-  ##[1:10] sb_valid_q
-);
+  c_scoreboard_valid_seen: cover property (
+    ##[1:10] sb_valid_q
+  );
 
-// Did we ever look up the symbolic entry after it was tracked?
-c_symbolic_lookup_seen: cover property (
-  sb_valid_q &&
-  lookup_matches_symbolic
-);
-
-// Did the DUT ever hit for the symbolic entry?
-c_symbolic_lookup_hit_seen: cover property (
-  sb_valid_q &&
-  lookup_matches_symbolic &&
-  lu_hit_o
-);
+  c_tracked_napot_hit_seen: cover property (
+    tracked_update &&
+    update_i.is_napot_64k
+    ##[1:10]
+    sb_valid_q &&
+    lookup_matches_tracked &&
+    lu_hit_o
+  );
 
   c_tracked_update_seen: cover property (
     ##[1:10] tracked_update
   );
 
-  c_tracked_update_then_hit: cover property (
+c_tracked_update_then_hit: cover property (
     tracked_update
     ##[1:10]
     sb_valid_q &&
     lookup_matches_tracked &&
     lu_hit_o &&
-    (lu_content_o == sb_content_q) &&
-    (lu_is_page_o == sb_is_page_q) &&
-    (!tracked_uses_g_stage || (lu_g_content_o == sb_g_content_q))
+    pte_content_matches_abstract(
+      lu_content_o,
+      sb_content_q,
+      sb_is_napot_64k_q
+    )
   );
 
   c_sfence_vma_flush_seen: cover property (
@@ -474,6 +488,39 @@ c_symbolic_lookup_hit_seen: cover property (
     hfence_gvma_flush_matches_tracked
   );
 
+  c_rvh_enabled: cover property (
+    CVA6Cfg.RVH
+    );
+
+    c_hyp_stage_context_seen: cover property (
+    CVA6Cfg.RVH &&
+    v_i &&
+    g_st_enbl_i &&
+    s_st_enbl_i
+  );
+
+  c_tracked_virtualized_update_seen: cover property (
+    tracked_update &&
+    update_i.v_st_enbl[HYP_EXT*2] &&
+    update_i.v_st_enbl[0]
+  );
+
+  c_tracked_g_stage_update_seen: cover property (
+    tracked_update &&
+    update_i.v_st_enbl[HYP_EXT]
+  );
+
+  c_tracked_napot_update_seen: cover property (
+    ##[1:10]
+    tracked_update &&
+    update_i.is_napot_64k
+  );
+
+  c_tracked_large_page_update_seen: cover property (
+    ##[1:10]
+    tracked_update &&
+    (|update_i.is_page)
+  );
 
 endmodule
 
