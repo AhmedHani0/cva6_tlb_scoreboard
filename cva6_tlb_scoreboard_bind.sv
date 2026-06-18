@@ -421,6 +421,7 @@ module cva6_tlb_scoreboard_bind
     ##1 !sb_valid_q
   );
 
+    //remove dependency from flush matches trackes, make it only if sb_valid_q is zero
   p_any_flush_to_tracked_must_miss_after: assert property (
     flush_matches_tracked
     |=>
