@@ -5,7 +5,7 @@ set WORK_ROOT      "/import/lab/users/hassan/Downloads/MasterProjekt/cva6_tlb_sc
 
 # 1) Read CVA6 packages first.
 read_verilog -sv $CVA6_RTL_ROOT/include/config_pkg.sv
-read_verilog -sv $CVA6_RTL_ROOT/include/cv64a6_imafdc_sv39_config_pkg.sv
+read_verilog -sv $CVA6_RTL_ROOT/include/cv32a60x_config_pkg.sv
 read_verilog -sv $CVA6_RTL_ROOT/include/build_config_pkg.sv
 read_verilog -sv $CVA6_RTL_ROOT/include/riscv_pkg.sv
 read_verilog -sv $CVA6_RTL_ROOT/include/ariane_pkg.sv

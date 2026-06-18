@@ -99,7 +99,17 @@ module cva6_tlb_scoreboard_bind
         sb_masked.ppn[3:0]  = '0;
       end
 
-      pte_content_matches_abstract = (dut_masked == sb_masked);
+      pte_content_matches_abstract = (dut_masked.ppn == sb_masked.ppn &&
+                                      dut_masked.rsw == sb_masked.rsw &&
+                                      dut_masked.n == sb_masked.n &&
+                                      dut_masked.d == sb_masked.d &&
+                                      dut_masked.a == sb_masked.a &&
+                                      dut_masked.g == sb_masked.g &&
+                                      dut_masked.u == sb_masked.u &&
+                                      dut_masked.x == sb_masked.x &&
+                                      dut_masked.w == sb_masked.w &&
+                                      dut_masked.r == sb_masked.r &&
+                                      dut_masked.v == sb_masked.v);
     end
   endfunction
 
@@ -349,17 +359,16 @@ module cva6_tlb_scoreboard_bind
       track_chosen_q     <= 1'b0;
       tracked_vpn_q      <= '0;
       tracked_asid_q     <= '0;
+      tracked_vmid_q     <= '0;
       sb_valid_q         <= 1'b0;
       sb_is_napot_64k_q  <= 1'b0;
       sb_v_st_enbl_q     <= '0;
       sb_content_q       <= '0;
-      sb_g_content_q     <= '0;
-      tracked_vmid_q     <= '0;
+
     end else begin
-      //FLUSH
       if (flush_matches_tracked) begin
         sb_valid_q <= 1'b0;
-      //TRACKED UPDATE
+
       end else if (tracked_update) begin
         track_chosen_q     <= 1'b1;
         tracked_vpn_q      <= update_i.vpn[VPN_LEN-1:0];
@@ -370,10 +379,10 @@ module cva6_tlb_scoreboard_bind
         sb_is_napot_64k_q  <= update_i.is_napot_64k;
         sb_v_st_enbl_q     <= update_i.v_st_enbl;
         sb_content_q       <= update_i.content;
-        sb_g_content_q     <= update_i.g_content;
-      // INVALIDATE FOR NEXT UPDATE
+
       end else if (sb_valid_q && effective_tlb_update) begin
         sb_valid_q <= 1'b0;
+        // Do not reset track_chosen_q.
       end
     end
   end
@@ -421,7 +430,7 @@ module cva6_tlb_scoreboard_bind
     ##1 !sb_valid_q
   );
 
-    //remove dependency from flush matches trackes, make it only if sb_valid_q is zero
+  //remove dependency from flush matches trackes, make it only if sb_valid_q is zero
   p_any_flush_to_tracked_must_miss_after: assert property (
     flush_matches_tracked
     |=>
