@@ -1,0 +1,16 @@
+-R- Assertion 'sva/i_cva6_tlb/i_cva6_tlb_scoreboard_bind/p_tracked_data_integrity_on_hit' holds bounded up to 30 cycles from reset (checked in 7 h 26 min 38 sec, 2922 MB used)
+    Prover        Group Status      Steps/Max.        Real Time   Mem. Peak  Result / Reason
+    ----------------------------------------------------------------------------------------------------
+    approver1:0   0     done            3/3            0.00 sec   683.92 MB  hold_bounded (0)
+    approver1:1   0     done            3/3            0.00 sec   683.92 MB  hold_bounded (0)
+    approver2     0     done            3/3            0.00 sec  1010.78 MB  hold_bounded (0)
+    approver3     1     done            3/30           6.00 sec  1992.92 MB  open
+    approver4     1     done           24/30    5 h 50 min 59 sec  2922.21 MB  hold_bounded (27)
+    disprover1    1     done           30/30      59 min 42 sec  2922.21 MB  hold_bounded (30) / interrupted
+    disprover3    1     done           23/30      59 min 42 sec  2922.21 MB  hold_bounded (23)
+    prover1       1     done            0/unltd        0.00 sec  1010.78 MB  open / given up
+    prover2       1     done            6/unltd 7 h 26 min 37 sec  2922.21 MB  hold_bounded (6)
+
+-I- Finished assertion 'sva/i_cva6_tlb/i_cva6_tlb_scoreboard_bind/p_tracked_data_integrity_on_hit' (Stage 3)
+-I- Finished assertion 'sva/i_cva6_tlb/i_cva6_tlb_scoreboard_bind/p_tracked_data_integrity_on_hit' (Stage 2)
+-I- Finished assertion 'sva/i_cva6_tlb/i_cva6_tlb_scoreboard_bind/p_tracked_data_integrity_on_hit' (Stage 1)
