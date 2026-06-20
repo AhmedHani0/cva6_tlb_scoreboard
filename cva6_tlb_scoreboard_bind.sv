@@ -382,7 +382,6 @@ module cva6_tlb_scoreboard_bind
 
       end else if (sb_valid_q && effective_tlb_update) begin
         sb_valid_q <= 1'b0;
-        // Do not reset track_chosen_q.
       end
     end
   end
@@ -430,15 +429,17 @@ module cva6_tlb_scoreboard_bind
     ##1 !sb_valid_q
   );
 
-  //remove dependency from flush matches trackes, make it only if sb_valid_q is zero
+  //If we have already tracked an entry,
+  //and the scoreboard currently says this tracked entry is invalid,
+  //then a lookup matching that tracked identity must not hit.
   p_any_flush_to_tracked_must_miss_after: assert property (
-    flush_matches_tracked
-    |=>
-    (
-      (lu_access_i && lookup_matches_tracked && !update_i.valid)
-      |->
-      !lu_hit_o
-    )
+    track_chosen_q &&
+    !sb_valid_q && 
+    lu_access_i && 
+    lookup_matches_tracked && 
+    !update_i.validx
+    |->
+    !lu_hit_o
   );
 
   // ---------------------------------------------------------------------------
