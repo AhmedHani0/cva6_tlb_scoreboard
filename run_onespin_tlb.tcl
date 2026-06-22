@@ -17,7 +17,7 @@ read_verilog -sv $WORK_ROOT/cva6_tlb_formal_pkg.sv
 read_verilog -sv \
   $WORK_ROOT/cva6_tlb.sv \
   $WORK_ROOT/cva6_tlb_formal_top.sv \
-  $WORK_ROOT/cva6_tlb_scoreboard_bind.sv
+  $WORK_ROOT/cva6_tlb_scoreboard_uniqueness_pagesize.sv
 
 # 4) Elaborate the wrapper.
 set_elaborate_option -golden -top {Verilog!work.cva6_tlb_formal_top}
