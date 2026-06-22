@@ -5,7 +5,7 @@ set WORK_ROOT      "/import/lab/users/hassan/Downloads/MasterProjekt/cva6_tlb_sc
 
 # 1) Read CVA6 packages first.
 read_verilog -sv $CVA6_RTL_ROOT/include/config_pkg.sv
-read_verilog -sv $CVA6_RTL_ROOT/include/cv64a6_imafdc_sv39_config_pkg.sv
+read_verilog -sv $CVA6_RTL_ROOT/include/cv32a60x_config_pkg.sv
 read_verilog -sv $CVA6_RTL_ROOT/include/build_config_pkg.sv
 read_verilog -sv $CVA6_RTL_ROOT/include/riscv_pkg.sv
 read_verilog -sv $CVA6_RTL_ROOT/include/ariane_pkg.sv
@@ -17,7 +17,7 @@ read_verilog -sv $WORK_ROOT/cva6_tlb_formal_pkg.sv
 read_verilog -sv \
   $WORK_ROOT/cva6_tlb.sv \
   $WORK_ROOT/cva6_tlb_formal_top.sv \
-  $WORK_ROOT/cva6_tlb_scoreboard_bind.sv
+  $WORK_ROOT/cva6_tlb_scoreboard_final.sv
 
 # 4) Elaborate the wrapper.
 set_elaborate_option -golden -top {Verilog!work.cva6_tlb_formal_top}
@@ -41,5 +41,5 @@ foreach c $all_checks {
     puts "============================================================"
     puts "Running check: $c"
     puts "============================================================"
-    check $c
+    check -verbose $c
 }
