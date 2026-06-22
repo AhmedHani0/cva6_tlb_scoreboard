@@ -5,7 +5,6 @@ This repository contains standalone formal verification setups for CVA6 TLB-rela
 The current focus is on:
 
 * `cva6_tlb`: private TLB verification.
-* `cva6_shared_tlb`: shared TLB verification.
 
 The verification is done using SystemVerilog Assertions (SVA) and OneSpin.
 
@@ -137,7 +136,7 @@ and the update must match the missed lookup identity remembered by the scoreboar
 This models the high-level MMU/PTW behavior:
 
 ```text
-lookup miss -> page table walker response -> TLB refill
+lookup miss -> shared TLB response -> TLB refill
 ```
 
 without implementing the full PTW.
