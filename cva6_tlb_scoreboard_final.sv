@@ -107,6 +107,14 @@ module cva6_tlb_scoreboard_bind
   logic [HYP_EXT*2:0] miss_stage_q;
 
   // ---------------------------------------------------------------------------
+  // Flushed identity remembered by the scoreboard.
+  // ---------------------------------------------------------------------------
+  logic flushed_valid_q;
+  logic [VPN_LEN-1:0] flushed_vpn_q;
+  logic [CVA6Cfg.ASID_WIDTH-1:0] flushed_asid_q;
+  logic [CVA6Cfg.VMID_WIDTH-1:0] flushed_vmid_q;
+  logic [HYP_EXT*2:0] flushed_stage_q;
+  // ---------------------------------------------------------------------------
   // Helpers.
   // ---------------------------------------------------------------------------
   function automatic logic [VPN_LEN-1:0] vpn_from_vaddr(
@@ -348,6 +356,18 @@ module cva6_tlb_scoreboard_bind
   assign any_flush =
       flush_i || flush_vvma_i || flush_gvma_i;
 
+  wire lookup_matches_flushed;
+
+  assign lookup_matches_flushed =
+      flushed_valid_q &&
+      lu_access_i &&
+      (vpn_from_vaddr(lu_vaddr_i) == flushed_vpn_q) &&
+      ((!flushed_stage_q[0]) ||
+      (lu_asid_i == flushed_asid_q)) &&
+      ((!CVA6Cfg.RVH) ||
+      (!flushed_stage_q[HYP_EXT]) ||
+      (lu_vmid_i == flushed_vmid_q)) &&
+      (current_v_st_enbl == flushed_stage_q);
   // ---------------------------------------------------------------------------
   // Scoreboard FSM.
   // ---------------------------------------------------------------------------
@@ -372,6 +392,12 @@ module cva6_tlb_scoreboard_bind
       miss_asid_q         <= '0;
       miss_vmid_q         <= '0;
       miss_stage_q        <= '0;
+
+      flushed_valid_q <= 1'b0;
+      flushed_vpn_q   <= '0;
+      flushed_asid_q  <= '0;
+      flushed_vmid_q  <= '0;
+      flushed_stage_q <= '0;
 
     end else begin
       unique case (sb_state_q)
@@ -398,6 +424,7 @@ module cva6_tlb_scoreboard_bind
             sb_g_content_q     <= update_i.g_content;
 
             miss_valid_q       <= 1'b0;
+            flushed_valid_q <= 1'b0;
             sb_state_q         <= SB_TRACKING;
 
           // Remember the most recent miss while waiting for the update.
@@ -412,12 +439,25 @@ module cva6_tlb_scoreboard_bind
 
         SB_TRACKING: begin
           // A matching flush invalidates the tracked entry and returns to MISS.
+          // we intentionally keep track_chosen_q high. From this point:
+          //   sb_valid_q == 0      means the tracked entry is invalid.
+          //   track_chosen_q == 1  means the scoreboard still remembers the flushed
+          //                        identity so it can prove that a later lookup to the
+          //                        same identity misses unless a new update refills it.
           if (flush_matches_tracked) begin
+            // Save the identity that was valid immediately before the flush.
+            // remember the old identity for the post-flush miss property.
+            flushed_valid_q <= sb_valid_q && track_chosen_q;
+            flushed_vpn_q   <= tracked_vpn_q;
+            flushed_asid_q  <= tracked_asid_q;
+            flushed_vmid_q  <= tracked_vmid_q;
+            flushed_stage_q <= sb_v_st_enbl_q;
+
             sb_state_q     <= SB_MISS;
             sb_valid_q     <= 1'b0;
             track_chosen_q <= 1'b0;
             miss_valid_q   <= 1'b0;
-
+          end
           // Any observed lookup miss means the current tracked abstraction is no
           // longer the refill candidate. Move to MISS and remember this miss.
           end else if (lookup_miss) begin
@@ -508,10 +548,13 @@ module cva6_tlb_scoreboard_bind
       ##1 (sb_in_miss_state && !sb_valid_q)
     );
 
-    p_any_flush_to_tracked_must_miss_after: assert property (
-      flush_matches_tracked &&!sb_valid_q && lu_access_i && lookup_matches_tracked && !update_i.valid)
-        |->
-        !lu_hit_o
+    p_flushed_entry_must_miss: assert property (
+      !sb_valid_q &&
+      lookup_matches_flushed &&
+      !any_flush &&
+      !effective_tlb_update
+      |->
+      !lu_hit_o
     );
   // ---------------------------------------------------------------------------
   // Cover / witness checks.
