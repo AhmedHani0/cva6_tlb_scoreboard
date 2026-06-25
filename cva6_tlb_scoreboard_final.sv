@@ -509,7 +509,7 @@ module cva6_tlb_scoreboard_bind
     );
 
     p_any_flush_to_tracked_must_miss_after: assert property (
-        (!sb_valid_q && lu_access_i && lookup_matches_tracked && !update_i.valid)
+      flush_matches_tracked &&!sb_valid_q && lu_access_i && lookup_matches_tracked && !update_i.valid)
         |->
         !lu_hit_o
     );
